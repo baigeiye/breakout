@@ -1,4 +1,6 @@
 use bevy::prelude::*;
+use bevy::text::TextStyle;
+use bevy::ui::{AlignItems, JustifyContent, PositionType};
 
 const WINDOW_WIDTH: f32 = 800.0;
 const WINDOW_HEIGHT: f32 = 600.0;
@@ -15,6 +17,7 @@ const PADDLE_SPEED: f32 = 500.0;
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::rgb(0.1, 0.1, 0.2)))
+        .insert_resource(GameState::Running) // 添加游戏状态资源
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 resolution: (WINDOW_WIDTH, WINDOW_HEIGHT).into(),
@@ -24,7 +27,7 @@ fn main() {
             ..default()
         }))
         .add_systems(Startup, setup)
-        .add_systems(Update, (move_paddle, move_ball, ball_collision))
+        .add_systems(Update, (move_paddle, move_ball, ball_collision, check_game_end))
         .run();
 }
 
@@ -38,6 +41,18 @@ struct Ball {
 
 #[derive(Component)]
 struct Brick;
+
+#[derive(Resource, PartialEq, Eq)]
+enum GameState {
+    Running,
+    Won,
+    Lost,
+}
+
+#[derive(Component)]
+struct GameMessage;
+
+
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
@@ -106,7 +121,12 @@ fn move_paddle(
     keyboard_input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     mut query: Query<&mut Transform, With<Paddle>>,
+    game_state: Res<GameState>,
 ) {
+    if *game_state != GameState::Running {
+        return;
+    }
+
     let mut transform = query.single_mut();
     let mut direction = 0.0;
 
@@ -124,7 +144,11 @@ fn move_paddle(
         .clamp(-WINDOW_WIDTH / 2.0 + PADDLE_WIDTH / 2.0, WINDOW_WIDTH / 2.0 - PADDLE_WIDTH / 2.0);
 }
 
-fn move_ball(time: Res<Time>, mut query: Query<(&mut Transform, &Ball)>) {
+fn move_ball(time: Res<Time>, mut query: Query<(&mut Transform, &Ball)>, game_state: Res<GameState>) {
+    if *game_state != GameState::Running {
+        return;
+    }
+
     let (mut transform, ball) = query.single_mut();
     let delta = ball.velocity * time.delta_seconds();
     transform.translation.x += delta.x;
@@ -136,7 +160,12 @@ fn ball_collision(
     mut ball_query: Query<(&mut Ball, &Transform)>,
     paddle_query: Query<&Transform, With<Paddle>>,
     brick_query: Query<(Entity, &Transform), With<Brick>>,
+    mut game_state: ResMut<GameState>,
 ) {
+    if *game_state != GameState::Running {
+        return;
+    }
+
     let (mut ball, ball_transform) = ball_query.single_mut();
     let ball_pos = ball_transform.translation;
 
@@ -151,10 +180,11 @@ fn ball_collision(
         ball.velocity.y = -ball.velocity.y;
     }
 
-    // Bottom (game over)
+    // Bottom (Game Over)
     if ball_pos.y - BALL_SIZE / 2.0 <= -WINDOW_HEIGHT / 2.0 {
-        println!("Game Over!");
         ball.velocity = Vec2::ZERO;
+        *game_state = GameState::Lost;
+        return;
     }
 
     // Paddle collision
@@ -171,7 +201,72 @@ fn ball_collision(
             break;
         }
     }
+
+    // Check for win
+    if brick_query.iter().count() == 0 {
+        ball.velocity = Vec2::ZERO;
+        *game_state = GameState::Won;
+    }
 }
+
+fn check_game_end(
+    mut commands: Commands,
+    game_state: Res<GameState>,
+    asset_server: Res<AssetServer>,
+    existing: Query<Entity, With<GameMessage>>,
+) {
+    if !game_state.is_changed() {
+        return;
+    }
+
+    // 如果已经显示过消息了，不再重复显示
+    if existing.iter().next().is_some() {
+        return;
+    }
+
+    let message = match *game_state {
+        GameState::Won => " Congratulations on passing the level!",
+        GameState::Lost => " Game Over!",
+        _ => return,
+    };
+
+    // 父节点：全屏容器居中
+    commands.spawn((
+        NodeBundle {
+            style: Style {
+                width: Val::Percent(100.0),
+                height: Val::Percent(100.0),
+                justify_content: JustifyContent::Center,
+                align_items: AlignItems::Center,
+                position_type: PositionType::Absolute,
+                ..default()
+            },
+            background_color: Color::NONE.into(),
+            ..default()
+        },
+        GameMessage,
+    ))
+    .with_children(|parent| {
+        parent.spawn(
+            TextBundle::from_section(
+                message,
+                TextStyle {
+                    font: asset_server.load("fonts/FiraSans-Bold.ttf"),
+                    font_size: 40.0,
+                    color: Color::WHITE,
+                },
+            )
+            .with_style(Style {
+                align_self: AlignSelf::Center,
+                ..default()
+            }),
+        );
+    });
+
+    println!("{message}");
+}
+
+
 
 fn collide(ball_pos: Vec3, ball_size: f32, other_pos: Vec3, other_w: f32, other_h: f32) -> bool {
     let dx = (ball_pos.x - other_pos.x).abs();
