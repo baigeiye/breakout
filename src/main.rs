@@ -41,9 +41,6 @@ struct Ball {
     velocity: Vec2,
 }
 
-#[derive(Component)]
-struct Brick;
-
 #[derive(Resource, PartialEq, Eq)]
 enum GameState {
     Running,
@@ -59,6 +56,12 @@ struct LastScore(Option<u32>);
 
 #[derive(Component)]
 struct GameMessage;
+
+#[derive(Component)]
+struct Brick {
+    health: u32,
+    is_special: bool,
+}
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
@@ -102,6 +105,17 @@ fn setup(mut commands: Commands) {
         for col in 0..bricks_per_row {
             let x = -WINDOW_WIDTH / 2.0 + BRICK_WIDTH / 2.0 + col as f32 * (BRICK_WIDTH + BRICK_SPACING);
             let y = WINDOW_HEIGHT / 2.0 - BRICK_HEIGHT - row as f32 * (BRICK_HEIGHT + BRICK_SPACING);
+
+            let is_special = (row + col) % 4 == 0;
+
+            let color = if is_special {
+                Color::rgb(0.2, 0.4, 0.9)
+            } else {
+                Color::rgb(0.8, 0.2, 0.2)
+            };
+
+            let health = if is_special { 2 } else { 1 };
+
             commands.spawn((
                 SpriteBundle {
                     transform: Transform {
@@ -109,13 +123,10 @@ fn setup(mut commands: Commands) {
                         scale: Vec3::new(BRICK_WIDTH, BRICK_HEIGHT, 1.0),
                         ..default()
                     },
-                    sprite: Sprite {
-                        color: Color::rgb(0.8, 0.2, 0.2),
-                        ..default()
-                    },
+                    sprite: Sprite { color, ..default() },
                     ..default()
                 },
-                Brick,
+                Brick { health, is_special },
             ));
         }
     }
@@ -163,7 +174,7 @@ fn ball_collision(
     mut commands: Commands,
     mut ball_query: Query<(&mut Ball, &Transform)>,
     paddle_query: Query<&Transform, With<Paddle>>,
-    brick_query: Query<(Entity, &Transform), With<Brick>>,
+    mut brick_query: Query<(Entity, &Transform, &mut Brick, &mut Sprite)>,
     mut game_state: ResMut<GameState>,
     mut score: ResMut<Score>,
 ) {
@@ -195,12 +206,22 @@ fn ball_collision(
         ball.velocity.y = ball.velocity.y.abs();
     }
 
-    for (entity, brick_transform) in brick_query.iter() {
+    let mut hit_brick = None;
+    for (entity, brick_transform, mut brick, mut sprite) in brick_query.iter_mut() {
         if collide(ball_pos, BALL_SIZE, brick_transform.translation, BRICK_WIDTH, BRICK_HEIGHT) {
+            hit_brick = Some((entity, brick, sprite));
             ball.velocity.y = -ball.velocity.y;
-            commands.entity(entity).despawn_recursive();
-            score.0 += 1;
             break;
+        }
+    }
+
+    if let Some((entity, mut brick, mut sprite)) = hit_brick {
+        brick.health -= 1;
+        if brick.health == 0 {
+            score.0 += if brick.is_special { 2 } else { 1 };
+            commands.entity(entity).despawn();
+        } else {
+            sprite.color.set_a(0.5);
         }
     }
 
@@ -218,11 +239,7 @@ fn check_game_end(
     score: Res<Score>,
     last_score: Res<LastScore>,
 ) {
-    if !game_state.is_changed() {
-        return;
-    }
-
-    if existing.iter().next().is_some() {
+    if !game_state.is_changed() || existing.iter().next().is_some() {
         return;
     }
 
@@ -327,11 +344,7 @@ fn restart_game(
     ball: Query<Entity, With<Ball>>,
     messages: Query<Entity, With<GameMessage>>,
 ) {
-    if *game_state == GameState::Running {
-        return;
-    }
-
-    if !keyboard_input.just_pressed(KeyCode::KeyR) {
+    if *game_state == GameState::Running || !keyboard_input.just_pressed(KeyCode::KeyR) {
         return;
     }
 
