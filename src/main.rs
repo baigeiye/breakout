@@ -1,5 +1,4 @@
 use bevy::prelude::*;
-use bevy::text::TextStyle;
 use bevy::ui::{AlignItems, JustifyContent, PositionType};
 
 const WINDOW_WIDTH: f32 = 800.0;
@@ -10,6 +9,7 @@ const PADDLE_HEIGHT: f32 = 20.0;
 const BALL_SIZE: f32 = 15.0;
 const BRICK_WIDTH: f32 = 60.0;
 const BRICK_HEIGHT: f32 = 30.0;
+const BRICK_SPACING: f32 = 5.0;
 
 const BALL_SPEED: f32 = 300.0;
 const PADDLE_SPEED: f32 = 500.0;
@@ -17,7 +17,9 @@ const PADDLE_SPEED: f32 = 500.0;
 fn main() {
     App::new()
         .insert_resource(ClearColor(Color::rgb(0.1, 0.1, 0.2)))
-        .insert_resource(GameState::Running) // 添加游戏状态资源
+        .insert_resource(GameState::Running)
+        .insert_resource(Score(0))
+        .insert_resource(LastScore(None))
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             primary_window: Some(Window {
                 resolution: (WINDOW_WIDTH, WINDOW_HEIGHT).into(),
@@ -27,7 +29,7 @@ fn main() {
             ..default()
         }))
         .add_systems(Startup, setup)
-        .add_systems(Update, (move_paddle, move_ball, ball_collision, check_game_end))
+        .add_systems(Update, (move_paddle, move_ball, ball_collision, check_game_end, restart_game))
         .run();
 }
 
@@ -49,15 +51,18 @@ enum GameState {
     Lost,
 }
 
+#[derive(Resource)]
+struct Score(u32);
+
+#[derive(Resource)]
+struct LastScore(Option<u32>);
+
 #[derive(Component)]
 struct GameMessage;
-
-
 
 fn setup(mut commands: Commands) {
     commands.spawn(Camera2dBundle::default());
 
-    // Paddle
     commands.spawn((
         SpriteBundle {
             transform: Transform {
@@ -74,7 +79,6 @@ fn setup(mut commands: Commands) {
         Paddle,
     ));
 
-    // Ball
     commands.spawn((
         SpriteBundle {
             transform: Transform {
@@ -93,11 +97,11 @@ fn setup(mut commands: Commands) {
         },
     ));
 
-    // Bricks
+    let bricks_per_row = ((WINDOW_WIDTH + BRICK_SPACING) / (BRICK_WIDTH + BRICK_SPACING)).floor() as usize;
     for row in 0..2 {
-        for col in 0..10 {
-            let x = -WINDOW_WIDTH / 2.0 + BRICK_WIDTH / 2.0 + col as f32 * (BRICK_WIDTH + 5.0);
-            let y = WINDOW_HEIGHT / 2.0 - BRICK_HEIGHT - row as f32 * (BRICK_HEIGHT + 5.0);
+        for col in 0..bricks_per_row {
+            let x = -WINDOW_WIDTH / 2.0 + BRICK_WIDTH / 2.0 + col as f32 * (BRICK_WIDTH + BRICK_SPACING);
+            let y = WINDOW_HEIGHT / 2.0 - BRICK_HEIGHT - row as f32 * (BRICK_HEIGHT + BRICK_SPACING);
             commands.spawn((
                 SpriteBundle {
                     transform: Transform {
@@ -161,6 +165,7 @@ fn ball_collision(
     paddle_query: Query<&Transform, With<Paddle>>,
     brick_query: Query<(Entity, &Transform), With<Brick>>,
     mut game_state: ResMut<GameState>,
+    mut score: ResMut<Score>,
 ) {
     if *game_state != GameState::Running {
         return;
@@ -169,7 +174,6 @@ fn ball_collision(
     let (mut ball, ball_transform) = ball_query.single_mut();
     let ball_pos = ball_transform.translation;
 
-    // Bounce on walls
     if ball_pos.x - BALL_SIZE / 2.0 <= -WINDOW_WIDTH / 2.0
         || ball_pos.x + BALL_SIZE / 2.0 >= WINDOW_WIDTH / 2.0
     {
@@ -180,29 +184,26 @@ fn ball_collision(
         ball.velocity.y = -ball.velocity.y;
     }
 
-    // Bottom (Game Over)
     if ball_pos.y - BALL_SIZE / 2.0 <= -WINDOW_HEIGHT / 2.0 {
         ball.velocity = Vec2::ZERO;
         *game_state = GameState::Lost;
         return;
     }
 
-    // Paddle collision
     let paddle_transform = paddle_query.single();
     if collide(ball_pos, BALL_SIZE, paddle_transform.translation, PADDLE_WIDTH, PADDLE_HEIGHT) {
         ball.velocity.y = ball.velocity.y.abs();
     }
 
-    // Brick collision
     for (entity, brick_transform) in brick_query.iter() {
         if collide(ball_pos, BALL_SIZE, brick_transform.translation, BRICK_WIDTH, BRICK_HEIGHT) {
             ball.velocity.y = -ball.velocity.y;
-            commands.entity(entity).despawn();
+            commands.entity(entity).despawn_recursive();
+            score.0 += 1;
             break;
         }
     }
 
-    // Check for win
     if brick_query.iter().count() == 0 {
         ball.velocity = Vec2::ZERO;
         *game_state = GameState::Won;
@@ -214,23 +215,38 @@ fn check_game_end(
     game_state: Res<GameState>,
     asset_server: Res<AssetServer>,
     existing: Query<Entity, With<GameMessage>>,
+    score: Res<Score>,
+    last_score: Res<LastScore>,
 ) {
     if !game_state.is_changed() {
         return;
     }
 
-    // 如果已经显示过消息了，不再重复显示
     if existing.iter().next().is_some() {
         return;
     }
 
-    let message = match *game_state {
-        GameState::Won => " Congratulations on passing the level!",
-        GameState::Lost => " Game Over!",
+    let main_message = match *game_state {
+        GameState::Won => format!("Congratulations! Final Score: {}", score.0),
+        GameState::Lost => format!("Game Over! Final Score: {}", score.0),
         _ => return,
     };
 
-    // 父节点：全屏容器居中
+    let hint_message = "Press R to restart";
+
+    let compare_message = match last_score.0 {
+        None => "",
+        Some(last) => {
+            if score.0 > last {
+                "Better than just now"
+            } else if score.0 < last {
+                "Keep up the good work"
+            } else {
+                "Keep it up"
+            }
+        }
+    };
+
     commands.spawn((
         NodeBundle {
             style: Style {
@@ -239,6 +255,7 @@ fn check_game_end(
                 justify_content: JustifyContent::Center,
                 align_items: AlignItems::Center,
                 position_type: PositionType::Absolute,
+                flex_direction: FlexDirection::Column,
                 ..default()
             },
             background_color: Color::NONE.into(),
@@ -249,7 +266,7 @@ fn check_game_end(
     .with_children(|parent| {
         parent.spawn(
             TextBundle::from_section(
-                message,
+                main_message,
                 TextStyle {
                     font: asset_server.load("fonts/FiraSans-Bold.ttf"),
                     font_size: 40.0,
@@ -257,16 +274,81 @@ fn check_game_end(
                 },
             )
             .with_style(Style {
+                margin: UiRect::all(Val::Px(10.0)),
+                align_self: AlignSelf::Center,
+                ..default()
+            }),
+        );
+
+        if !compare_message.is_empty() {
+            parent.spawn(
+                TextBundle::from_section(
+                    compare_message,
+                    TextStyle {
+                        font: asset_server.load("fonts/FiraSans-Bold.ttf"),
+                        font_size: 30.0,
+                        color: Color::ORANGE,
+                    },
+                )
+                .with_style(Style {
+                    margin: UiRect::all(Val::Px(5.0)),
+                    align_self: AlignSelf::Center,
+                    ..default()
+                }),
+            );
+        }
+
+        parent.spawn(
+            TextBundle::from_section(
+                hint_message,
+                TextStyle {
+                    font: asset_server.load("fonts/FiraSans-Bold.ttf"),
+                    font_size: 24.0,
+                    color: Color::GRAY,
+                },
+            )
+            .with_style(Style {
+                margin: UiRect::all(Val::Px(5.0)),
                 align_self: AlignSelf::Center,
                 ..default()
             }),
         );
     });
-
-    println!("{message}");
 }
 
+fn restart_game(
+    keyboard_input: Res<ButtonInput<KeyCode>>,
+    mut commands: Commands,
+    mut game_state: ResMut<GameState>,
+    mut score: ResMut<Score>,
+    mut last_score: ResMut<LastScore>,
+    bricks: Query<Entity, With<Brick>>,
+    paddle: Query<Entity, With<Paddle>>,
+    ball: Query<Entity, With<Ball>>,
+    messages: Query<Entity, With<GameMessage>>,
+) {
+    if *game_state == GameState::Running {
+        return;
+    }
 
+    if !keyboard_input.just_pressed(KeyCode::KeyR) {
+        return;
+    }
+
+    for entity in bricks.iter().chain(paddle.iter()).chain(ball.iter()) {
+        commands.entity(entity).despawn();
+    }
+
+    for entity in messages.iter() {
+        commands.entity(entity).despawn_recursive();
+    }
+
+    last_score.0 = Some(score.0);
+    score.0 = 0;
+    *game_state = GameState::Running;
+
+    setup(commands);
+}
 
 fn collide(ball_pos: Vec3, ball_size: f32, other_pos: Vec3, other_w: f32, other_h: f32) -> bool {
     let dx = (ball_pos.x - other_pos.x).abs();
